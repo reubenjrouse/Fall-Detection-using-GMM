@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 # Load your trained GMM model
 gmm_model = joblib.load("gmm_model.pkl")
 
-
 def preprocess_frame(frame):
     # Resize
     resized_frame = cv.resize(frame, (640, 240))
@@ -21,17 +20,12 @@ def preprocess_frame(frame):
     return sharpened_frame
 
 def extract_features_from_frame(prev_gray, gray, mask):
-
-    # cv.imshow("frame",gray)
-    flow = cv.calcOpticalFlowFarneback(prev_gray, gray,None,0.5, 3, 15, 3, 5, 1.2, 0)
-
+    flow = cv.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
     magnitude, angle = cv.cartToPolar(flow[..., 0], flow[..., 1])
     mask[..., 0] = angle * 180 / np.pi / 2
     mask[..., 2] = cv.normalize(magnitude, None, 0, 255, cv.NORM_MINMAX)
-    rgb = cv.cvtColor(mask, cv.COLOR_HSV2BGR)
-    # cv.imshow("mask",rgb)
     feature_vector = np.concatenate((magnitude.flatten(), angle.flatten()))
-    return feature_vector
+    return feature_vector, np.mean(magnitude)
 
 def main():
     st.title("Fall Detection App")
@@ -53,14 +47,16 @@ def main():
             prev_gray = preprocess_frame(cv.cvtColor(first_frame, cv.COLOR_BGR2GRAY))
 
             features_list = []
+            avg_magnitude_list = []
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 gray = preprocess_frame(cv.cvtColor(frame, cv.COLOR_BGR2GRAY))
-                feature_vector = extract_features_from_frame(prev_gray, gray, mask)
+                feature_vector, avg_magnitude = extract_features_from_frame(prev_gray, gray, mask)
                 features_list.append(feature_vector)
+                avg_magnitude_list.append(avg_magnitude)
                 prev_gray = gray
 
             cap.release()
@@ -83,54 +79,47 @@ def main():
             plt.ylabel('Principal Component 2')
             plt.colorbar(label='Cluster')
             st.pyplot(plt)
-            c1_array=[]
-            c2_array=[]
-            fall_frames=[]
-            train_cluster_labels = gmm_model.predict(X_pca)
 
-            cluster_frames = {}
-            for cluster_label in np.unique(train_cluster_labels):
-                cluster_frames[cluster_label] = []
+            # Calculate the average optical flow magnitude for each cluster
+            cluster_avg_magnitude = {}
+            for cluster_label in np.unique(cluster_labels):
+                cluster_magnitudes = [avg_magnitude_list[i] for i in range(len(cluster_labels)) if cluster_labels[i] == cluster_label]
+                cluster_avg_magnitude[cluster_label] = np.mean(cluster_magnitudes)
 
-            for i, label in enumerate(train_cluster_labels):
-                cluster_frames[label].append(i)
-            for cluster_label, frames in cluster_frames.items():
-                print(f"Cluster {cluster_label}: {len(frames)} frames")
-                if cluster_label == 0:  # cluster 0 corresponds to the "not fall" class
-                    c1_array = frames
-                elif cluster_label == 1:  # cluster 1 corresponds to the "fall" class
-                    c2_array = frames
-            if len(c1_array)<len(c2_array):
-                fall_frames = c1_array
+            # Identify the cluster with the highest average optical flow magnitude
+            fall_cluster_label = max(cluster_avg_magnitude, key=cluster_avg_magnitude.get)
+
+            # Find the fall frames based on the cluster label with the highest average magnitude
+            fall_frames = [i for i, label in enumerate(cluster_labels) if label == fall_cluster_label]
+
+            if fall_frames:
+                fall_frames_str = " ".join(map(str, fall_frames))
+                st.text(f"Fall detected in frames: {fall_frames_str}")
+                
+                # Reset the video capture to process the fall frames
+                cap = cv.VideoCapture(temp_file.name)
+
+                frame_width = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+                frame_height = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv.CAP_PROP_FPS)
+                fourcc = cv.VideoWriter_fourcc(*'X264')
+                video_writer = cv.VideoWriter('output_fall_detection.mp4', fourcc, fps, (frame_width, frame_height))
+                
+                frame_counter = 0
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    if frame_counter in fall_frames:
+                        video_writer.write(frame)
+                    frame_counter += 1
+
+                cap.release()
+                video_writer.release()
+                st.success("Fall sequence video generated successfully!")
+                st.video('output_fall_detection.mp4')
             else:
-                fall_frames = c2_array
-            
-            st.write("Fall detected")
-            st.write(fall_frames)
-            
-            frame_width = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv.CAP_PROP_FPS)
-            fourcc = cv.VideoWriter_fourcc(*'XVID')
-            video_writer = cv.VideoWriter('path_to_generated_video.mp4', fourcc, fps, (frame_width, frame_height))
-            
-            
-            frame_counter=0
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_counter+=1
-                if frame_counter in fall_frames:
-                    video_writer.write(frame)
-
-            cap.release()
-            video_writer.release()
-            cv.destroyAllWindows()
-            st.write("Fall detected")
-
-
+                st.write("No falls detected in the video.")
 
 if __name__ == "__main__":
-
     main()
